@@ -84,28 +84,56 @@ type Gateway interface {
 type CapturableGateway interface {
 	Gateway
 	// CaptureTopupPayment captures a previously-created payment identified by
-	// its gateway transaction id (PayPal order id). completed is true when the
-	// gateway reports the payment captured/completed.
-	CaptureTopupPayment(ctx context.Context, gatewayTxnID string) (completed bool, err error)
+	// its gateway transaction id (PayPal order id). The result reports whether
+	// the gateway completed the payment and, when a method was vaulted during
+	// the capture (PayPal vault-on-purchase), its details to persist.
+	CaptureTopupPayment(ctx context.Context, gatewayTxnID string) (CaptureResult, error)
 }
 
-// SavedMethodGateway is a Gateway that can store a payment method against a
-// provider customer and reuse it for off-session charges (Stripe customers +
-// cards). PayPal does not implement it in this cut. The gateway-agnostic
-// Service owns the saved-method ledger (payment_methods); this interface is
-// only the provider-side calls.
+// SavedMethodDetails describes a payment method to persist, produced by a
+// gateway when a method is saved during a payment: a Stripe card (retrieved
+// after its webhook) or a PayPal wallet (vaulted during capture). Card is set
+// for cards; PayPalEmail/PayPalPayerID for a PayPal wallet.
+type SavedMethodDetails struct {
+	CustomerID      string
+	PaymentMethodID string
+	PaymentType     string // "card" | "paypal_wallet"
+	Card            *CardDetails
+	PayPalEmail     string
+	PayPalPayerID   string
+}
+
+// CaptureResult is the outcome of capturing a CapturableGateway payment.
+// SavedMethod is non-nil when the capture vaulted a reusable method, for the
+// Service to persist.
+type CaptureResult struct {
+	Completed   bool
+	SavedMethod *SavedMethodDetails
+}
+
+// SavedMethodGateway is a Gateway that can store a payment method for a tenant
+// and reuse it for off-session charges — Stripe (customers + cards) and PayPal
+// (vaulted wallet tokens). The gateway-agnostic Service owns the saved-method
+// ledger (payment_methods); this interface is only the provider-side calls.
 type SavedMethodGateway interface {
 	Gateway
-	// CreateCustomer creates a provider customer that stored methods attach to.
+	// CreateCustomer returns the provider customer id that stored methods are
+	// grouped under (Stripe creates one via the API; PayPal derives a stable
+	// synthetic id, as PayPal has no customer object).
 	CreateCustomer(ctx context.Context, email, name string, metadata map[string]string) (customerID string, err error)
-	// RetrieveCardDetails fetches a stored method's card brand/last4/expiry.
-	RetrieveCardDetails(ctx context.Context, paymentMethodID string) (CardDetails, error)
 	// ChargeSavedMethod charges a stored method off-session. It returns the
 	// gateway transaction id and whether the charge settled synchronously
 	// (succeeded); when false the payment settles later via webhook.
 	ChargeSavedMethod(ctx context.Context, in SavedChargeInput) (gatewayTxnID string, succeeded bool, err error)
 	// DetachPaymentMethod removes a stored method at the provider.
 	DetachPaymentMethod(ctx context.Context, paymentMethodID string) error
+}
+
+// cardRetriever is implemented by gateways that finish saving a card only after
+// the payment succeeds, by fetching its details (Stripe, from its webhook).
+// PayPal does not implement it — it vaults during capture (see CaptureResult).
+type cardRetriever interface {
+	RetrieveCardDetails(ctx context.Context, paymentMethodID string) (CardDetails, error)
 }
 
 // Gateway returns a configured gateway implementation, built from its stored

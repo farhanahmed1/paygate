@@ -41,8 +41,8 @@ func (s *Service) ProcessWebhook(ctx context.Context, gateway string, payload []
 				// fail the webhook (which would reverse nothing but would
 				// trigger pointless retries). The card can be saved on a later
 				// topup if this transiently fails.
-				if smg, ok := gw.(SavedMethodGateway); ok {
-					_ = s.persistSavedCard(ctx, smg, gateway, tenantID, ev.CustomerID, ev.PaymentMethodID)
+				if cr, ok := gw.(cardRetriever); ok {
+					_ = s.persistSavedCard(ctx, cr, gateway, tenantID, ev.CustomerID, ev.PaymentMethodID)
 				}
 			}
 		}
@@ -65,13 +65,19 @@ func (s *Service) ProcessWebhook(ctx context.Context, gateway string, payload []
 }
 
 // persistSavedCard fetches the charged card's details from the gateway and
-// stores it for the tenant. Called only after the topup was credited.
-func (s *Service) persistSavedCard(ctx context.Context, gw SavedMethodGateway, gateway string, tenantID uuid.UUID, customerID, pmID string) error {
+// stores it for the tenant. Called only after the topup was credited (Stripe's
+// webhook save path; PayPal vaults at capture time instead — see CaptureTopup).
+func (s *Service) persistSavedCard(ctx context.Context, gw cardRetriever, gateway string, tenantID uuid.UUID, customerID, pmID string) error {
 	card, err := gw.RetrieveCardDetails(ctx, pmID)
 	if err != nil {
 		return err
 	}
-	return s.savePaymentMethod(tenantID, gateway, customerID, pmID, card)
+	return s.savePaymentMethod(tenantID, gateway, SavedMethodDetails{
+		CustomerID:      customerID,
+		PaymentMethodID: pmID,
+		PaymentType:     "card",
+		Card:            &card,
+	})
 }
 
 // recordWebhookEvent stores the event for audit and idempotency. A duplicate

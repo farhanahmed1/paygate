@@ -14,8 +14,11 @@ const (
 //
 // Config holds the decrypted credential key/values. Keys are gateway-specific
 // and interpreted by the gateway implementations, not by this core package:
-//   stripe → publishable_key, secret_key, webhook_secret
-//   paypal → client_id, client_secret, webhook_id
+//
+//	stripe → publishable_key, secret_key, webhook_secret
+//	paypal → client_id, client_secret, webhook_id, return_url, cancel_url
+//	         (return_url/cancel_url are required only to save methods / vault)
+//
 // Config is empty when the gateway row exists but has not been configured yet.
 type GatewaySetting struct {
 	Name        string

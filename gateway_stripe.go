@@ -19,6 +19,13 @@ type stripeGateway struct {
 	webhookSecret string
 }
 
+// Compile-time checks that the Stripe gateway satisfies the optional contracts.
+// It saves cards via its webhook (cardRetriever), not via capture.
+var (
+	_ SavedMethodGateway = (*stripeGateway)(nil)
+	_ cardRetriever      = (*stripeGateway)(nil)
+)
+
 // newStripeGateway builds the gateway from decrypted gateway config. secret_key
 // is required; webhook_secret is required only to verify webhooks.
 func newStripeGateway(config map[string]string) (*stripeGateway, error) {

@@ -96,12 +96,13 @@ func (s *Service) ensureCustomer(ctx context.Context, gw SavedMethodGateway, ten
 	return gw.CreateCustomer(ctx, email, name, map[string]string{"tenant_id": tenantID.String()})
 }
 
-// savePaymentMethod upserts a saved card for the tenant, keyed on
-// (tenant, gateway, gateway_payment_method_id). The tenant's first card (when
-// no active default exists) becomes the default; re-saving an existing card
-// refreshes its details and reactivates it without demoting an existing
-// default. Idempotent, so the webhook can call it on every redelivery.
-func (s *Service) savePaymentMethod(tenantID uuid.UUID, gateway, customerID, pmID string, card CardDetails) error {
+// savePaymentMethod upserts a saved method for the tenant — a card (Stripe) or
+// a PayPal wallet — keyed on (tenant, gateway, gateway_payment_method_id). The
+// tenant's first method (when no active default exists) becomes the default;
+// re-saving an existing one refreshes its details and reactivates it without
+// demoting an existing default. Idempotent, so the webhook/capture can call it
+// on every redelivery.
+func (s *Service) savePaymentMethod(tenantID uuid.UUID, gateway string, in SavedMethodDetails) error {
 	var hasDefault bool
 	if err := s.db.QueryRow(
 		`SELECT EXISTS(SELECT 1 FROM payment_methods
@@ -111,24 +112,46 @@ func (s *Service) savePaymentMethod(tenantID uuid.UUID, gateway, customerID, pmI
 		return fmt.Errorf("paygate: check default method: %w", err)
 	}
 
-	nickname := titleBrand(card.Brand) + " ending in " + card.Last4
+	// Card columns are set for cards; paypal columns for wallets. Absent columns
+	// are stored as SQL NULL (nil interface), not empty/zero.
+	var cardBrand, cardLast4, expMonth, expYear, payEmail, payPayer interface{}
+	var nickname string
+	if in.Card != nil {
+		cardBrand, cardLast4 = in.Card.Brand, in.Card.Last4
+		expMonth, expYear = in.Card.ExpMonth, in.Card.ExpYear
+		nickname = titleBrand(in.Card.Brand) + " ending in " + in.Card.Last4
+	} else {
+		nickname = "PayPal"
+		if in.PayPalEmail != "" {
+			nickname += " (" + in.PayPalEmail + ")"
+			payEmail = in.PayPalEmail
+		}
+		if in.PayPalPayerID != "" {
+			payPayer = in.PayPalPayerID
+		}
+	}
+
 	if _, err := s.db.Exec(
 		`INSERT INTO payment_methods
 		     (tenant_id, gateway, payment_type, gateway_customer_id, gateway_payment_method_id,
-		      card_brand, card_last4, card_exp_month, card_exp_year, nickname,
+		      card_brand, card_last4, card_exp_month, card_exp_year,
+		      paypal_email, paypal_payer_id, nickname,
 		      is_default, is_active, last_used_at)
-		 VALUES ($1, $2, 'card', $3, $4, $5, $6, $7, $8, $9, $10, true, NOW())
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, true, NOW())
 		 ON CONFLICT (tenant_id, gateway, gateway_payment_method_id) DO UPDATE
 		    SET gateway_customer_id = EXCLUDED.gateway_customer_id,
 		        card_brand          = EXCLUDED.card_brand,
 		        card_last4          = EXCLUDED.card_last4,
 		        card_exp_month      = EXCLUDED.card_exp_month,
 		        card_exp_year       = EXCLUDED.card_exp_year,
+		        paypal_email        = EXCLUDED.paypal_email,
+		        paypal_payer_id     = EXCLUDED.paypal_payer_id,
 		        is_default          = payment_methods.is_default OR EXCLUDED.is_default,
 		        is_active           = true,
 		        last_used_at        = NOW()`,
-		tenantID, gateway, customerID, pmID,
-		card.Brand, card.Last4, card.ExpMonth, card.ExpYear, nickname, !hasDefault,
+		tenantID, gateway, in.PaymentType, in.CustomerID, in.PaymentMethodID,
+		cardBrand, cardLast4, expMonth, expYear,
+		payEmail, payPayer, nickname, !hasDefault,
 	); err != nil {
 		return fmt.Errorf("paygate: save payment method: %w", err)
 	}
@@ -260,13 +283,13 @@ func (s *Service) ChargeSavedMethod(ctx context.Context, tenantID, methodID uuid
 		return CreateTopupResult{}, fmt.Errorf("paygate: minimum topup is %d cents", minTopupCents)
 	}
 
-	var gateway, customerID, pmID, last4 string
+	var gateway, customerID, pmID, nickname string
 	err := s.db.QueryRow(
-		`SELECT gateway, gateway_customer_id, gateway_payment_method_id, COALESCE(card_last4, '')
+		`SELECT gateway, gateway_customer_id, gateway_payment_method_id, COALESCE(nickname, '')
 		   FROM payment_methods
 		  WHERE id = $1 AND tenant_id = $2 AND is_active = true`,
 		methodID, tenantID,
-	).Scan(&gateway, &customerID, &pmID, &last4)
+	).Scan(&gateway, &customerID, &pmID, &nickname)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CreateTopupResult{}, ErrPaymentMethodNotFound
 	}
@@ -298,13 +321,17 @@ func (s *Service) ChargeSavedMethod(ctx context.Context, tenantID, methodID uuid
 		return CreateTopupResult{}, err
 	}
 
+	desc := "Account topup using saved payment method"
+	if nickname != "" {
+		desc = "Account topup using " + nickname // e.g. "… Visa ending in 4242" / "… PayPal (a@b.com)"
+	}
 	txnID, err := s.CreateTopupTransaction(CreateTopupInput{
 		TenantID:          tenantID,
 		Gateway:           gateway,
 		Amount:            CentsToAmount(amountCents),
 		GatewayTxnID:      gwTxnID,
 		GatewayCustomerID: customerID,
-		Description:       "Account topup using saved card ending in " + last4,
+		Description:       desc,
 	})
 	if err != nil {
 		return CreateTopupResult{}, err

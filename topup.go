@@ -135,15 +135,25 @@ func (s *Service) CaptureTopup(ctx context.Context, tenantID uuid.UUID, gateway,
 		return false, fmt.Errorf("paygate: gateway %q does not support capture", gateway)
 	}
 
-	captured, err := cg.CaptureTopupPayment(ctx, gatewayTxnID)
+	res, err := cg.CaptureTopupPayment(ctx, gatewayTxnID)
 	if err != nil {
 		return false, err
 	}
-	if !captured {
+	if !res.Completed {
 		_ = s.MarkTopupFailed(id)
 		return false, nil
 	}
-	return s.CompleteTopup(id)
+	credited, err := s.CompleteTopup(id)
+	if err != nil {
+		return false, err
+	}
+	// PayPal vault-on-purchase returns the vaulted method in the capture; persist
+	// it best-effort (the credit is the money-critical step, like Stripe's
+	// webhook save).
+	if res.SavedMethod != nil {
+		_ = s.savePaymentMethod(tenantID, gateway, *res.SavedMethod)
+	}
+	return credited, nil
 }
 
 // TopupGatewayOption tells the browser how to render a gateway payment option.

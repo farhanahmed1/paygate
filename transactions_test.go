@@ -19,19 +19,19 @@ func TestValidateTopupAmount(t *testing.T) {
 	}
 
 	invalid := []string{
-		"",            // empty
-		"0",           // zero
-		"0.0000",      // zero with scale
-		"-5",          // negative
-		"-0.01",       // negative
-		"1.23456",     // 5 fractional digits (> scale 4)
-		"abc",         // non-numeric
-		"25.00.00",    // malformed
-		"1,000",       // grouping separator
-		" 25.00",      // leading space
-		"25 ",         // trailing space
-		"$25",         // currency symbol
-		"1e3",         // scientific notation
+		"",         // empty
+		"0",        // zero
+		"0.0000",   // zero with scale
+		"-5",       // negative
+		"-0.01",    // negative
+		"1.23456",  // 5 fractional digits (> scale 4)
+		"abc",      // non-numeric
+		"25.00.00", // malformed
+		"1,000",    // grouping separator
+		" 25.00",   // leading space
+		"25 ",      // trailing space
+		"$25",      // currency symbol
+		"1e3",      // scientific notation
 	}
 	for _, s := range invalid {
 		if err := validateTopupAmount(s); err == nil {
